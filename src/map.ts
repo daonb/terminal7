@@ -153,7 +153,6 @@ export class T7Map {
         })
     }
     add(g: Gate): Element {
-
         const d = (document.createElement('div') as GatePadHTMLElement)
         const container = document.createElement('div')
         d.className = "gate-pad"
@@ -240,6 +239,8 @@ export class T7Map {
     }
 
     refresh() {
+        const gatesE = document.getElementById("gates")
+        const footerE = document.getElementById("map-footer")
         const pads = document.querySelectorAll(".gate-pad")
         const add = document.getElementById("add-gate")
         
@@ -247,13 +248,29 @@ export class T7Map {
             return
         // fill the last line with empty pads as needed
         // start with cleaning old fillers
-        document.querySelectorAll("#gates .empty-pad").forEach(e => e.remove())
-        for (let i = pads.length % 4; i < 4; i++) {
+        document.querySelectorAll(".empty-pad").forEach(e => e.remove())
+        // get the screens width
+        const width = document.getElementById("terminal7").offsetWidth
+        // get the width of a pad
+        const padWidth = width > 1200 ? 4 : 2
+        // fill the last line with empty pads
+        const padCount = pads.length % padWidth
+        if (padCount > 0)
+            for (let i = pads.length % padWidth;
+                 i < padWidth;
+                 i++) {
+                const e = document.createElement("div")
+                e.appendChild(document.createElement("div"))
+
+                e.className = "empty-pad"
+                add.after(e)
+            }
+        // fill the last line with empty pads
+        for (let i = 0; i < pads.length; i++) {
             const e = document.createElement("div")
             e.appendChild(document.createElement("div"))
-
             e.className = "empty-pad"
-            add.after(e)
+            footerE.prepend(e)
         }
     }
     async updateStats() {

@@ -71,7 +71,9 @@ h3 { margin: 0.2em; color: var(--local-border); }
 
 #terminal7 {
     height: 100%; 
+    width: 1200px;
 	overflow-x: auto;
+    position: relative;
 }
 #terminal7 *, #navbar * {
     user-select: none;
@@ -221,7 +223,7 @@ a {
     bottom: 0;
     left: 0;
     padding: 9px 0 18px;
-    position: fixed;
+    position: absolute;
 }
 nav button {
     flex: 1;
@@ -398,7 +400,7 @@ button.rename-close {
 #map {
     position: relative;
     padding-top: 1em;
-    width: 1200px;
+    width: 100%;
     display: none;
     text-align: center;
     margin: 0 auto;
@@ -435,7 +437,7 @@ button.rename-close {
 }
 #gates {
     width: 100%;
-    background: top repeat-y url("/map/middle.png");
+    background: top left url("/map/middle.png");
 }
 
 #gates p {
@@ -489,7 +491,7 @@ label {
     background-color: inherit;
 }
 #log-minimized {
-    width: 1200px;
+    width: 100%;
     cursor: pointer;
     position: relative;
     margin: 0 auto;
@@ -527,18 +529,6 @@ label {
     height: 100%;
     width: 100%;
 }
-@media (min-width: 600px) {
-    #title-short {
-        display: none;
-    }
-    #title-long {
-        display: block;
-    }
-    #version {
-        max-width: 35vw;
-    }
-}
-
 .search-container {
     margin: 0 auto;
     width: 80%;
@@ -709,7 +699,7 @@ audio { display: none; }
     display: block;
     margin: 0 auto;
     height: 370px;
-    background: right no-repeat url("/map/top.png");
+    background: left no-repeat url("/map/top.png");
 }
 .gate-pad, .empty-pad {
     width: 25%;
@@ -785,7 +775,7 @@ audio { display: none; }
 }
 #map-footer {
     clear: both;
-    background: top no-repeat url("/map/bottom.png")
+    background: top left no-repeat url("/map/bottom.png")
 }
 .line-break {
     margin: 0;
@@ -884,7 +874,19 @@ video {
     opacity: 0.8;
     z-index: 3;
 }
-@media (max-width: 600px) {
+@media (min-width: 1000px) {
+    #title-short {
+        display: none;
+    }
+    #title-long {
+        display: block;
+    }
+    #version {
+        max-width: 35vw;
+    }
+}
+
+@media (max-width: 1000px) {
     #log {
         width: 90vw;
     }
@@ -896,5 +898,24 @@ video {
     }
     #version {
         max-width: 35vw;
+    }
+    #terminal7 {
+        width: 600px;
+    }
+    #gates {
+        width: 600px;
+    }
+    #twr {
+        left: 384px;
+        top: 132px;
+    }
+
+
+    .map-header-wide {
+        height: 298px;
+        background: left no-repeat url("/map/top_narrow.png");
+    }
+    .gate-pad, .empty-pad {
+        width: 50%;
     }
 }

@@ -13,12 +13,13 @@ import { WebLinksAddon } from '@xterm/addon-web-links'
 import { FitAddon } from "@xterm/addon-fit"
 import { WebglAddon } from '@xterm/addon-webgl'
 import { ImageAddon } from '@xterm/addon-image'
-import interact from 'interactjs'
-import FontFaceObserver from "fontfaceobserver"
 
 import { Shell } from './shell'
 import { Capacitor } from '@capacitor/core'
 import { WebRTCSession } from "./webrtc_session"
+
+import interact from 'interactjs'
+import FontFaceObserver from "fontfaceobserver"
 
 // openEmulator loads the font and opens the given terminal
 export async function openEmulator(e: HTMLElement, t: Terminal) {
@@ -29,17 +30,17 @@ export async function openEmulator(e: HTMLElement, t: Terminal) {
         fontFamily = "FiraCode"
     }
     t.options.fontFamily = fontFamily
-    if (fontFamily === "FiraCode") {
+    // @ts-ignore
+    if (!import.meta.env.TEST) {
         try {
             await new FontFaceObserver(fontFamily).load(null, 200)
             await new FontFaceObserver(fontFamily, { weight: "bold" }).load(null, 200)
-            t.open(e)
         } catch (e) {
-            t.options.fontFamily = "monospace"
-            t.open(e)
+            this.notify(`Font ${fontFamily} not found, using FiraCode`)
+            t.options.fontFamily = "FiraCode"
         }   
-    } else
-        t.open(e)
+    }
+    t.open(e)
 }
 
 type GatePadHTMLElement = HTMLDivElement & {gate: Gate}
@@ -48,6 +49,8 @@ export class T7Map {
     ttyWait: number
     shell: Shell
     fitAddon: FitAddon
+    webGLAddon: WebglAddon
+    updateTask = 0
 
     open(): Promise<void> {
         return new Promise(resolve => {
@@ -105,16 +108,16 @@ export class T7Map {
                 ev.preventDefault()
             })
             this.t0.onData(d =>  this.shell.onTWRData(d))
-            const webGLAddon = new WebglAddon()
-            webGLAddon.onContextLoss(() => {
-                console.log("lost context")
-                webGLAddon.dispose()
-                this.t0.loadAddon(webGLAddon)
-            })
+            this.webGLAddon = new WebglAddon()
+            this.webGLAddon.onContextLoss(() => this.outOfMemory())
             try {
-                this.t0.loadAddon(webGLAddon)
-            } catch (e) { console.log("no webgl: ",e) }
+                this.t0.loadAddon(this.webGLAddon)
+            } catch (e) { 
+                terminal7.notify("WebGL not supported, using fallback")
+            }
             openEmulator(e, this.t0).finally(() => {
+                // set line wrap
+                this.t0.write("\x1b[?7h")
                 if (Capacitor.getPlatform() === "android") {
                     // hack for android spacebar & virtual keyboard
                     this.t0.element.addEventListener("input", (ev: Event & {data?}) => {
@@ -142,14 +145,15 @@ export class T7Map {
                     ev.stopPropagation()
                     ev.preventDefault()
                 })
-                document.getElementById("map").addEventListener("click", ev => {
+                interact(document.getElementById("map"))
+                .on("tap", ev => {
                     this.showLog(false)
                     terminal7.showChangelog(false)
                     ev.stopPropagation()
                     ev.preventDefault()
                 })
             }
-            setInterval(() => this.updateStats(), 1000)
+            this.updateTask = window.setInterval(() => this.updateStats(), 1000)
         })
     }
     add(g: Gate): Element {
@@ -185,9 +189,11 @@ export class T7Map {
         .on("tap", (ev) => {
                 const g = ev.target.closest(".gate-pad").gate
                 if (ev.dt < 500) {
-                    this.shell.runCommand("connect", [g.name])
-                    ev.preventDefault()
                     ev.stopPropagation()
+                    const command = (ev.target.closest(".gate-edit"))? "edit" : "connect"
+                    this.shell.runCommand(command, [g.name])
+                    .then(() => this.showLog(false))
+                    .catch(e => terminal7.notify(e))
                 }
         })
         .on("hold", ev => {
@@ -196,14 +202,6 @@ export class T7Map {
             ev.stopPropagation()
             this.shell.runCommand("edit", [g.name])
         })
-        d.querySelector(".gate-edit").addEventListener("click", ev => {
-            const target = ev.target as  HTMLElement
-            const g = (target.closest(".gate-pad") as GatePadHTMLElement).gate
-            this.shell.runCommand("edit", [g.name])
-            ev.stopPropagation()
-            ev.preventDefault()
-        })
-
         this.refresh()
         return d
     }
@@ -359,4 +357,18 @@ export class T7Map {
             this.shell.printPrompt()
         }
     }
+    outOfMemory() {
+        console.log("lost context")
+        this.webGLAddon.dispose()
+        terminal7.gates.forEach(g => g.close())
+        this.webGLAddon = new WebglAddon()
+        this.t0.loadAddon(this.webGLAddon)
+        this.webGLAddon.onContextLoss(() => this.outOfMemory())
+        terminal7.notify("App out of memory, closed all gates.")
+    }
+    close() {
+        if (this.updateTask != 0)
+            clearInterval(this.updateTask)
+    }
+
 }

@@ -22,7 +22,7 @@ import { NativeAudio } from '@capacitor-community/native-audio'
 import { Channel, Failure } from './session'
 
 const ABIT = 10,
-    REGEX_SEARCH = false,
+    REGEX_SEARCH = true,
     COPYMODE_BORDER_COLOR = "#F952F9",
     FOCUSED_BORDER_COLOR = "#F4DB53",
     DECORATIONS: ISearchDecorationOptions = {
@@ -141,11 +141,6 @@ export class Pane extends Cell {
         this.t.loadAddon(this.imageAddon)
 
         const webGLAddon = new WebglAddon()
-        webGLAddon.onContextLoss(() => {
-            terminal7.log("lost context")
-            webGLAddon.dispose()
-        })
-
         this.createDividers()
         this.t.onSelectionChange(() => this.selectionChanged())
         openEmulator(e, this.t)
@@ -249,7 +244,7 @@ export class Pane extends Cell {
         e.style.borderColor = FOCUSED_BORDER_COLOR
         e.appendChild(te)
         c.appendChild(e)
-        this.w.e.classList.add("hidden")
+        this.gate.e.classList.add("hidden")
         navbar.classList.add("hidden")
         this.styleZoomed(e)
         c.classList.remove("hidden")
@@ -262,7 +257,7 @@ export class Pane extends Cell {
         const terminalE = zoomedPane.removeChild(zoomedPane.firstElementChild)
         if (terminalE) {
             this.e.appendChild(terminalE.firstElementChild)
-            this.w.e.classList.remove("hidden")
+            this.gate.e.classList.remove("hidden")
         }
         zoomedPane.classList.add("hidden")
         navbar.classList.remove("hidden")
@@ -590,13 +585,14 @@ export class Pane extends Cell {
             f = () => this.t7.dumpLog()
             break
         default:
-            if (ev.key >= "1" && ev.key <= "9") {
-                const win = this.gate.windows[ev.key - 1]
-                if (this.zoomed)
-                    this.toggleZoom()
-                if (win)
-                    win.focus()
-            }
+            if (ev.key >= "1" && ev.key <= "9")
+                f = () => {
+                    const win = this.gate.windows[ev.key - 1]
+                    if (this.zoomed)
+                        this.toggleZoom()
+                    if (win)
+                        win.focus()
+                }
             break
         }
 
@@ -1250,15 +1246,17 @@ export class Pane extends Cell {
 
         interact(e)
         .on("tap", () => {
-                if (this.w.activeP == this)
-                    return
-                this.focus()
-                this.gate.sendState()
+            terminal7.map.showLog(false)
+            if (this.w.activeP == this)
+                return
+            this.focus()
+            this.gate.sendState()
         })
         .on("doubletap", (ev) => {
-                this.toggleZoom()
-                ev.preventDefault()
-                ev.stopPropagation()
+            terminal7.map.showLog(false)
+            this.toggleZoom()
+            ev.preventDefault()
+            ev.stopPropagation()
         })
         .gesturable({
             listeners: {

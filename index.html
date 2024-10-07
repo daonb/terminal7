@@ -15,6 +15,7 @@
     <meta name="apple-touch-fullscreen" content="yes" />
     <meta name="apple-mobile-web-app-title" content="Terminal7" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
+    <script src="/virtual-webgl2.js"></script>
     <script type="module" src="/main.ts" defer></script>
     
 </head>
@@ -48,7 +49,7 @@
           <div id="version">
               <h1 id="title-long">Terminal 7</h1>
               <h1 id="title-short">T7</h1>
-              <p><a id="toggle-changelog" class="has-help" aria-label="Change log">version 1.10.1</a></p>
+              <p><a id="toggle-changelog" class="has-help" aria-label="Change log">version 1.11.1</a></p>
 			  <div id="changelog">
 				  <a href="https://github.com/tuzig/terminal7/blob/master/CHANGELOG.md" target="_blank">
 					  <i class="f7-icons">logo_github</i>
@@ -69,7 +70,7 @@
               <footer>map inspired by Eero Saarinen's T5</footer>
           </div>
       </div>
-      <div id="gates-container">
+      <div class="gates-container">
           <div id="active-gate-stats" class="gate-stats"></div>
           <div class="hidden zoomed pane-container" id="zoomed-pane"> </div>
       </div>

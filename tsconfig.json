@@ -6,10 +6,13 @@
         "src/__mocks__/**/*.ts"
     ],
    "compilerOptions": {
-       "target": "es6",
-       "allowSyntheticDefaultImports": true,
-       "module": "es6",
-       "lib": ["es6", "dom"],
-       "moduleResolution": "node"
+        "target": "ES2022",
+        "module": "ESNext",
+        "lib": ["DOM", "DOM.Iterable", "ESNext"],
+        "moduleResolution": "node",
+        "esModuleInterop": true,
+        "outDir": "./dist",
+        "rootDir": "./src",
+        "skipLibCheck": true
    }
 }

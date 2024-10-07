@@ -192,22 +192,24 @@ async function connectCMD(shell:Shell, args: string[]) {
         shell.t.writeln(`Host not found: ${hostname}`)
         return
     }
-    const pbOpen = terminal7.pb && terminal7.pb.isOpen()
-    const overPB = pbOpen && gate.fp && (gate.fp.length > 0) && gate.online
+    const native = Capacitor.isNativePlatform()
+    const pbOpen = terminal7.pb?.isOpen()
+    let overPB = pbOpen && gate.fp?.length > 0 && gate.online
     if (overPB && !gate.verified) {
-        const answer = await shell.askValue("Gate unverified, would you like to verify it?", "y")
-        if (answer == "y" || answer == "Y" || answer == "") {
-            await terminal7.pb.verifyFP(gate.fp)
-        } else {
-            if (Capacitor.isNativePlatform())
+        try {
+            await terminal7.pb.verifyFP(gate.fp, "Unverified peer. Please enter OTP to verify or CTRL-C")
+        } catch(e) {
+            if (native) {
                 shell.t.writeln("Falling back to SSH")
+                overPB = false
+            }
             else {
                 shell.t.writeln("Please verify the gate before connecting")
                 return
             }
         }
     }
-    if (Capacitor.isNativePlatform())  {
+    if (native && !overPB)  {
         let dirty = false
         if (!gate.addr) {
             try {
@@ -232,14 +234,6 @@ async function connectCMD(shell:Shell, args: string[]) {
             terminal7.storeGates()
         }
     }
-    let done = false
-    gate.onFailure = reason => {
-        terminal7.log(`Connect command got failure ${reason}`) 
-        shell.stopWatchdog()
-        gate.close()
-        terminal7.storeGates()
-        done = true
-    }
     if (gate.session) {
         gate.focus()
         return
@@ -253,80 +247,52 @@ async function connectCMD(shell:Shell, args: string[]) {
         terminal7.activeG.blur()
     }
     terminal7.activeG = gate
-    gate.connect(async () => {
+    gate.fitScreen = true
+    try {
+        await gate.connect()
+    } catch(e) {
+        gate.notify("Failed to connect")
+        gate.notify("Please try again and if it keeps failing, `support`")
+        return
+    } finally {
         shell.stopWatchdog()
-        if (gate.firstConnection) {
-            if (!gate.name) {
-                const fields: Fields = [{
-                    prompt: "Gate's name",
-                    validator: (a) => gate.t7.validateHostName(a),
-                    default: gate.addr,
-                }]
-                const res = await shell.runForm(fields, "text")
-                const name = res[0]
-                gate.name = name
-            }
-            gate.verified = true
-            gate.updateNameE()
-            gate.store = true
-            gate.firstConnection = false
-            await terminal7.storeGates()
+    }
+    if (gate.firstConnection) {
+        if (!gate.name) {
+            const fields: Fields = [{
+                prompt: "Gate's name",
+                validator: (a) => gate.t7.validateHostName(a),
+                default: gate.addr,
+            }]
+            const res = await shell.runForm(fields, "text")
+            const name = res[0]
+            gate.name = name
         }
-        let clipboardFilled = false
-        if (gate.keyRejected && !overPB) {
-            const keyForm = [
-                { prompt: "Just let me in" },
-                { prompt: "Copy command to clipboard" },
-            ]
-            let publicKey = ""  
-            try {
-                publicKey = (await terminal7.readId()).publicKey
-            } catch (e) {
-                terminal7.log("oops readId failed")
-            }
-            if (publicKey) {
-                const cmd = `echo "${publicKey}" >> "$HOME/.ssh/authorized_keys"`
-                shell.t.writeln(`\n To use face id please copy the ES25519 key by running:\n\n\x1B[1m${cmd}\x1B[0m\n`)
-                let res = ""
-                try {
-                    res = await shell.runForm(keyForm, "menu")
-                } catch (e) {}
-                switch(res) {
-                    case "Copy command to clipboard":
-                        Clipboard.write({ string: cmd })
-                        clipboardFilled = true
-                        break
-                }
-            }
-        } 
-        if (!clipboardFilled && gate.session.isSSH && !gate.onlySSH && pbOpen) {
-            let toConnect: boolean
-            try {
-                toConnect = await shell.offerInstall(gate)
-            } catch (e) {
-                toConnect = true
-            }
-            if (!toConnect) {
-                gate.close()
-                done = true
-                return
-            }
+        gate.verified = true
+        gate.updateNameE()
+        gate.store = true
+        gate.firstConnection = false
+        await terminal7.storeGates()
+    }
+    if (gate.session.isSSH && !gate.onlySSH && pbOpen) {
+        let toConnect: boolean
+        try {
+            toConnect = await shell.offerInstall(gate)
+        } catch (e) {
+            toConnect = true
         }
-        gate.load()
-        Preferences.get({key: "first_gate"}).then(v => {
+        if (!toConnect) {
+            gate.close()
+            return
+        }
+    }
+    Preferences.get({key: "first_gate"}).then(v => {
             if (v.value != "nope")
                 setTimeout(() => {
                     Preferences.set({key: "first_gate", value: "nope"})
                     terminal7.toggleHelp()
                 }, 200)
         })
-        done = true
-    })
-    terminal7.ignoreAppEvents = true
-    while (!done) {
-        await new Promise(r => setTimeout(r, 100))
-    }
-    terminal7.ignoreAppEvents = false
 }
 
 async function addCMD(shell: Shell) {
@@ -614,7 +580,7 @@ async function copyKeyCMD(shell: Shell) {
         publicKey = ret.publicKey
     } catch(e) {
         terminal7.log("readId error", e)
-        return shell.t.writeln("Error reading key")
+        return shell.t.writeln(`Error reading key: ${e}`)
     }
     Clipboard.write({ string: publicKey })
     return shell.t.writeln(`${publicKey}\n☝️ copied to 📋`)
@@ -638,8 +604,14 @@ async function subscribeCMD(shell: Shell) {
             "SIX_MONTH": "6 Months",
             "ANNUAL": "Year",
         }
-        const offerings = await Purchases.getOfferings(),
-            offer = offerings.current
+        let offerings
+        try {
+            offerings = await Purchases.getOfferings()
+        } catch(e) {
+            shell.t.writeln(e)
+            return
+        }
+        const offer = offerings.current
         const packages = offer.availablePackages.map(p => {
             const price = p.product.priceString,
                 period = TYPES[p.packageType],
@@ -711,6 +683,12 @@ async function subscribeCMD(shell: Shell) {
     }
     if (!terminal7.pb.isOpen()) {
         if (!Capacitor.isNativePlatform()) {
+            // we can't add a new subscriber on the web.
+            // the user has to buy a subscription from the app store
+            // on the weeb all he can do is login
+            shell.t.writeln("Subscribing is still WIP for web client")
+            shell.t.writeln("If you subscribed on the app, please login")
+            shell.t.writeln("")
             await loginCMD(shell);
             return
         }
@@ -772,17 +750,7 @@ export async function installCMD(shell: Shell, args: string[]) {
         return
     }
 
-    let uid = ""
-    try {
-        uid  = await terminal7.pb.getUID()
-    } catch(e) {
-        terminal7.log("getUID returned an error", e)
-    }
-    if (!uid && native) {
-        shell.t.writeln("Error connecting to PeerBook")
-        shell.t.writeln("Please try again or `support`")
-        return
-    }
+    const uid = terminal7.pb.uid
     let gate: Gate
 
     if (args[0]) {
@@ -849,7 +817,7 @@ export async function installCMD(shell: Shell, args: string[]) {
         try {
             res = await shell.runForm(shell.reconnectForm, "menu")
         } catch (err) {
-            gate.onFailure(Failure.Aborted)
+            gate.handleFailure(Failure.Aborted)
         }
         if (res == "Reconnect")
             await gate.connect()
@@ -875,7 +843,8 @@ export async function installCMD(shell: Shell, args: string[]) {
         publicKey = ids.publicKey
         privateKey = ids.privateKey
     } catch(e) {
-        console.log("readId error", e)
+        terminal7.log("readId error", e)
+        terminal7.notify(`Error reading key: ${e}`)
     }
 
     const session = new SSHSession(gate.addr, gate.username)
@@ -1030,7 +999,8 @@ async function supportCMD(shell: Shell) {
                 shell.t.writeln("Invalid email address")
                 email = await shell.askValue("Enter your email address")
             }
-            const description = await shell.askValue("Please explain how to recreate the issue: \n")
+            let description = await shell.askValue("Please explain how to recreate the issue: \n")
+            description += `\n\nOn: ${navigator.userAgent}\n`
             shell.t.writeln("Sending...")
             shell.startWatchdog(5000).catch(() => sendFailed())
             const res = await fetch(`${schema}://${terminal7.conf.net.peerbook}/support`, {

@@ -1,5 +1,4 @@
 /* Terminal 7
-
  *  This file contains the code that makes terminal 7 - a webrtc based
  *  touchable terminal multiplexer.
  *
@@ -29,7 +28,7 @@ import { RateApp } from 'capacitor-rate-app'
 
 
 import { PeerbookConnection, PB } from './peerbook'
-import { PeerbookSession } from './webrtc_session'
+import { ControlMessage } from './webrtc_session'
 import { Failure } from './session'
 import { Cell } from "./cell"
 import { Pane } from "./pane"
@@ -50,16 +49,18 @@ declare let window: {
 
 declare let navigator: NavType
 
-export const OPEN_HTML_SYMBOL = "📡"
-export const ERROR_HTML_SYMBOL = "🤕"
-export const CLOSED_HTML_SYMBOL = "🙁"
-export const LOCK_HTML_SYMBOL = "🔒"
+export const DEFAULT_STUN_SERVER = "stun:stun2.l.google.com:19302"
+export const OPEN_ICON = "📡"
+export const ERROR_ICON = "🤕"
+export const CLOSED_ICON = "🙁"
+export const LOCK_ICON = "🔒"
+const DEFAULT_LOG_LINES = 200
 const WELCOME=`    🖖 Greetings & Salutations 🖖
 
-Thanks for choosing Terminal7. This is TWR, a local
+Thanks for trying Terminal7. This is TWR, a local
 terminal used to control the terminal and log messages.
-Most buttons launch a TWR command so you don't need to 
-use \`help\`, just \`hide\`.
+Most buttons launch a TWR command so there's no need to 
+use \`help\` and you can just \`hide\`.
 If some characters looks off try CTRL-l.`
 
 const WELCOME_FOOTER=`
@@ -76,6 +77,7 @@ If you are a PeerBook subscriber, please \`login\`.
 `  + WELCOME_FOOTER
 
 // DEFAULT_DOTFILE is the default configuration file for Terminal7
+const DEFAULT_PB_HOST = "api.peerbook.io"
 export const DEFAULT_DOTFILE = `# Terminal7's configurations file
 [theme]
 # foreground = "#00FAFA"
@@ -193,7 +195,7 @@ export class Terminal7 {
         this.shortestLongPress  = settings.shortestLongPress || 1000
         this.borderHotSpotSize  = settings.borderHotSpotSize || 30
 
-        this.logBuffer = new CyclicArray(settings.logLines || 101)
+        this.logBuffer = new CyclicArray(settings.logLines || DEFAULT_LOG_LINES)
         this.pendingPanes = {}
 
         this.iceServers = settings.iceServers || null
@@ -213,19 +215,37 @@ export class Terminal7 {
             return
         }
         this.lastActiveState = active
-        this.log("app state changed", this.lastActiveState, this.ignoreAppEvents)
         if (this.ignoreAppEvents) {
             terminal7.log("ignoring app event", active)
             return
         }
-        if (!active)
-            this.updateNetworkStatus({connected: false}, false)
-        else {
-            // We're back! puts us in recovery mode so that it'll
-            // quietly reconnect to the active gate on failure
+        this.log("app state changed", this.lastActiveState, this.ignoreAppEvents)
+        if (!active) {
             this.clearTimeouts()
-            Network.getStatus().then(s => this.updateNetworkStatus(s))
+            this.updateNetworkStatus({connected: false}, false).finally(() =>
+                this.recovering = true)
         }
+        else if (this.recovering) {
+            // We're back!
+            const gate = this.activeG
+            if (gate)
+                // the watchdog is stopped by the gate when it connects
+                this.map.shell.startWatchdog().catch(() => {
+                    if (!gate.session) {
+                        terminal7.log("ignoring watchdos as session is closed")
+                        return
+                    }
+                    if (!gate.session.isOpen()) {
+                        gate.handleFailure(Failure.TimedOut)
+                    } else if (!this.pb.isOpen())
+                        this.pb.notify("Connection timed out")
+                    this.map.shell.printPrompt()
+                })
+            this.run(() => this.recovering=false, this.conf.net.timeout)
+            // real work is done in updateNetworkStatus
+            Network.getStatus().then(async s => await this.updateNetworkStatus(s))
+        } else 
+            this.log("app state change ignored")
     }
     /*
      * Terminal7.open opens terminal on the given DOM element,
@@ -390,7 +410,7 @@ export class Terminal7 {
         textbox.addEventListener('change', renameHandler)
     }
 
-    /*
+    /* FFU
      * restoreState is a future feature that uses local storage to restore
      * terminal7 to it's last state
      */
@@ -426,40 +446,48 @@ export class Terminal7 {
             this.pb.close()
         }
     }
+    // TODO: move to Shell
     async pbConnect(): Promise<void> {
         const statusE = document.getElementById("peerbook-status") as HTMLSpanElement
-        // TODO: refactor this to an sync function
-        return new Promise((resolve, reject) => {
+        return new Promise<void>((resolve, reject) => {
             const callResolve = () => {
                 statusE.style.opacity = "1"
+                statusE.innerHTML = OPEN_ICON
                 resolve()
             }
-            const callReject = (e, symbol = ERROR_HTML_SYMBOL) => {
+            const callReject = (e, symbol = ERROR_ICON) => {
                 statusE.style.opacity = "1"
                 statusE.innerHTML = symbol
+                this.pb.close()
                 terminal7.log("pbConnect failed", e)
                 reject(e)
             }
             const catchConnect = (e: string) => {
-                let symbol = LOCK_HTML_SYMBOL
+                let symbol = LOCK_ICON
                 if (e =="Unregistered")
-                    this.notify(Capacitor.isNativePlatform()?
-                        `${PB} You need to register, please \`subscribe\``:
-                        `${PB} You need to regisrer, please \`subscribe\` on your tablet`)
+                    this.notify(`${PB} Unregistered, please \`subscribe\``)
 
                 else if (e == Failure.NotSupported) {
                     // TODO: this should be changed to a notification
                     // after we upgrade peerbook
                     symbol = "🚱"
-                    console.log("PB not supported")
+                    this.log("PB not supported")
+                    const pbHost = this.conf.net.peerbook
+                    if (pbHost == DEFAULT_PB_HOST) {
+                        this.notify(`${PB} Failed to connect, please try again later`)
+                    } else {
+                        const url = (this.conf.peerbook.insecure ? "http://" : "https://") + pbHost
+                        this.notify(`${PB} Failed to connect to server at:`)
+                        this.notify(`    ${url}`)
+                    }
+                    this.notify("If the problem persists, please \`support\`")
+
                 }
                 else if (e != "Unauthorized") {
-                    terminal7.log("PB connect failed", e)
-                    this.notify(Capacitor.isNativePlatform()?
-                        `${PB} Failed to connect, please try \`subscribe\``:
-                        `${PB} Failed to connect, please try \`login\``)
-                    this.notify("If the problem persists, `support`")
-                    symbol = ERROR_HTML_SYMBOL
+                    this.log("PB connect failed", e)
+                    this.notify(`${PB} Failed to connect, please try again later`)
+                    this.notify("If the problem persists, \`support\`")
+                    symbol = ERROR_ICON
                 }
                 callReject(e, symbol)
             }
@@ -468,12 +496,9 @@ export class Terminal7 {
                 .then(callResolve)
                 .catch(catchConnect)
 
-            if (!this.netConnected)
-                callReject("No network")
-
             if (this.pb) {
                 if (this.pb.isOpen())
-                    callResolve()
+                    resolve()
                 else
                     complete()
                 return
@@ -499,7 +524,7 @@ export class Terminal7 {
      */
     // TODO: add onMap to props
     addGate(props, onMap = true) {
-        const container = document.getElementById('gates-container')
+        const container = this.e.querySelector(".gates-container")
         const p = props || {}
         // add the id
         p.id = p.fp || p.name
@@ -545,7 +570,7 @@ export class Terminal7 {
     async goHome() {
         await Preferences.remove({key: "last_state"})
         const s = document.getElementById('map-button')
-        const gatesContainer = document.getElementById('gates-container')
+        const gatesContainer = this.e.querySelector(".gates-container")
         gatesContainer.classList.add('hidden')
         s.classList.add('off')
         if (this.activeG) {
@@ -640,33 +665,27 @@ export class Terminal7 {
         this.netConnected = status.connected
         this.log(`updateNetworkStatus: ${status.connected}`)
         if (status.connected) {
-            if (updateNetPopup)
-                off.add("hidden")
             const gate = this.activeG
             const firstGate = (await Preferences.get({key: "first_gate"})).value
-            const toReconnect = gate && gate.boarding && (firstGate == "nope") && this.recovering
-            console.log("toReconnect", toReconnect, "firstGate", firstGate)
+            if (updateNetPopup)
+                off.add("hidden")
+            if (gate?.wasSSH) {
+                await gate.handleFailure(Failure.NotSupported)
+                return
+            }
+            const toReconnect = gate?.boarding && (firstGate == "nope") && this.recovering && (gate.reconnectCount == 0)
+            this.log("toReconnect", toReconnect, "firstGate", firstGate, this.recovering, gate.reconnectCount)
             if (toReconnect ) {
-                this.notify("🌞 Reconnecting")
-                this.map.shell.startWatchdog().catch(() => {
-                    if (this.pb.isOpen())
-                        gate.notify("Timed out")
-                    else
-                        this.notify(`${PB} timed out, retrying...`)
-                })
                 try {
                     await gate.reconnect()
                 } catch(e) {
-                    console.log("recoonect failed", e)
-                    this.map.shell.runCommand("reset", [gate.name])
+                    this.log("Reconnect failed", e)
                 } finally {
-                        this.recovering = false
-                        this.map.shell.stopWatchdog()
-                        this.map.shell.printPrompt()
+                    this.log("Reconnect finalized")
                 }
             }
         } else {
-            this.disengage().finally(() => this.recovering = true)
+            await this.disengage()
         }
     }
     loadConf(conf) {
@@ -689,12 +708,9 @@ export class Terminal7 {
         this.conf.ui.scrollback = this.conf.ui.scrollback || 10000
 
         this.conf.net = this.conf.net || {}
-        this.conf.net.iceServer = this.conf.net.ice_server || []
+        this.conf.net.iceServer = this.conf.net.ice_server || [ DEFAULT_STUN_SERVER ]
         this.conf.net.peerbook = this.conf.net.peerbook ||
-            "api.peerbook.io"
-        if (this.conf.net.peerbook == "pb.terminal7.dev")
-            terminal7.notify(`\uD83D\uDCD6 Your setting include an old peerbook addres.<br/>
-                              Please click <i class="f7-icons">gear</i> and change net.peerbook to "api.peerbook.io"`)
+            DEFAULT_PB_HOST
         this.conf.net.timeout = this.conf.net.timeout || 5000
         this.conf.net.retries = this.conf.net.retries || 3
         this.conf.net.recoveryTime = this.conf.net.recovery_time || 4000
@@ -866,72 +882,13 @@ export class Terminal7 {
         return modifierKeyPrefix
     }
 
-    // handle incomming peerbook messages (coming over sebsocket)
-    async onPBMessage(m) {
-        const statusE = document.getElementById("peerbook-status")
-        this.log("got pb message", m)
-        if (m["code"] !== undefined) {
-            if (m["code"] == 200) {
-                statusE.innerHTML = OPEN_HTML_SYMBOL
-                this.pb.uid = m["text"]
-            } else
-                // TODO: update statusE
-                this.notify(`\uD83D\uDCD6  ${m["text"]}`)
-            return
-        }
-        if (m["peers"] !== undefined) {
-            this.gates = this.pb.syncPeers(this.gates, m.peers)
-            this.map.refresh()
-            return
-        }
-        if (m["verified"] !== undefined) {
-            if (!m["verified"])
-                this.notify("\uD83D\uDCD6 UNVERIFIED. Please check you email.")
-            return
-        }
-        const fp = m.source_fp
-        // look for a gate where g.fp == fp
-        const myFP = await this.getFingerprint()
-        if (fp == myFP) {
-            return
-        }
-        let lookup =  this.gates.filter(g => g.fp == fp)
-
-        if (!lookup || (lookup.length != 1)) {
-            if (m["peer_update"] !== undefined) {
-                lookup =  this.gates.filter(g => g.name == m.peer_update.name)
-            }
-            if (!lookup || (lookup.length != 1)) {
-                terminal7.log("Got a pb message with unknown peer: ", fp)
-                return
-            }
-        }
-        const g = lookup[0]
-
-        if (m["peer_update"] !== undefined) {
-            g.online = m.peer_update.online
-            g.verified = m.peer_update.verified
-            g.fp = m.source_fp
-            await g.updateNameE()
-            return
-        }
-        if (!g.session) {
-            console.log("session is close ignoring message", m)
-            return
-        }
-        const session = g.session as PeerbookSession
-        if (m.candidate !== undefined) {
-            session.peerCandidate(m.candidate)
-            return
-        }
-        if (m.answer !== undefined ) {
-            const answer = JSON.parse(atob(m.answer))
-            session.peerAnswer(answer)
-            return
-        }
-    }
     log(...args) {
-        let line = ""
+        const now = new Date()
+        const hours = now.getHours().toString().padStart(2, '0')
+        const minutes = now.getMinutes().toString().padStart(2, '0')
+        const seconds = now.getSeconds().toString().padStart(2, '0')
+        const millis = now.getMilliseconds().toString().padStart(3, '0')
+        let line = `${hours}:${minutes}:${seconds}.${millis} `
         args.forEach(a => line += JSON.stringify(a) + " ")
         console.log(line)
         this.logBuffer.push(line)
@@ -1051,12 +1008,11 @@ export class Terminal7 {
                 title: "Access Private Key",
             })
         } catch(e) {
-            this.notify(`Biometric failed: ${e.message}`)
             throw "Biometric failed: " + e.message
         } finally {
             this.ignoreAppEvents = false
         }
-        console.log("Got biometric verified ", verified)
+        this.log("Got biometric verified ", verified)
         this.lastActiveState = false
 
         let publicKey
@@ -1167,5 +1123,36 @@ export class Terminal7 {
             && ((this.activeG == com)
                 || (this.activeG.activeW==com)
                 || (this.activeG.activeW && (this.activeG.activeW.activeP == com)))
+    }
+    getIceServers(): Promise<IceServers[]> {
+        return new Promise((resolve, reject) => {
+            if (this.iceServers) {
+                resolve(this.iceServers)
+                return
+            }
+            if (!this.pb.session || !this.pb.session.isOpen() ) {
+                this.setIceServers([])
+                resolve(this.iceServers)
+                return
+            }
+            this.pb.session.sendCTRLMsg(new ControlMessage("ice_servers"))
+            .then(resp => JSON.parse(resp))
+            .then(servers => {
+                this.setIceServers(servers)
+                resolve(this.iceServers)
+            }).catch(err =>
+                reject("failed to get ice servers " + err.toString())
+            )
+        })
+    }
+    setIceServers(servers) {
+        const iceServer = this.conf.net.iceServer
+        if (iceServer?.length > 0) {
+            if (servers && servers.length > 0)
+                servers.unshift({ urls: iceServer })
+            else
+                servers = [{ urls: iceServer }]
+        }
+        this.iceServers = servers
     }
 }

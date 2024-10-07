@@ -60,7 +60,8 @@ insecure=true`)
     test('a gate ssh port can be edited', async () => {
         const editBtn = page.locator('.gate-edit')
         await editBtn.click()
-        await sleep(200)
+        await page.locator('#t0').isVisible()
+
         await page.keyboard.press("Enter")
         await sleep(100)
         await page.keyboard.press("ArrowDown")
@@ -82,6 +83,9 @@ insecure=true`)
             return terminal7.gates[0].sshPort
         })
         expect(port).toEqual(1234)
+        // hide TWR for next test
+        await page.keyboard.type("hide")
+        await page.keyboard.press("Enter")
     })
 
     test('a host with no port can added', async () => {
@@ -105,7 +109,7 @@ insecure=true`)
         await page.reload({ waitUntil: "networkidle" })
         const addBtn = page.locator('[data-test="addButton"]').first()
         await addBtn.click()
-        await sleep(100)
+        await waitForTWROutput(page, "Enter destination", 500)
         await page.keyboard.type("baz:1234")
         await page.keyboard.press("Enter")
         const port = await page.evaluate(async () => {
@@ -132,6 +136,9 @@ insecure=true`)
         await sleep(100)
         await page.keyboard.type("y")
         await page.keyboard.press("Enter")
+        await page.evaluate(() => {
+            terminal7.map.showLog(true)
+        })
         await sleep(100)
         await page.keyboard.type("edit bar")
         await page.keyboard.press("Enter")
@@ -148,7 +155,7 @@ insecure=true`)
         await page.keyboard.type("hide")
         await page.keyboard.press("Enter")
     })
-    test('connect to gate with no webexec', async () => {
+    test('connect to gate with no webexec, get install command', async () => {
         await runSSHCommand(webexecSSHConfig, "webexec stop")
         await connectFirstGate(page)
         await sleep(1000)
@@ -229,7 +236,9 @@ insecure=true`)
         await expect(page.locator('#t0')).toBeHidden()
         await expect(page.locator('.pane')).toHaveCount(1)
         await expect(page.locator('.windows-container')).toBeVisible()
-        await waitForTWROutput(page, /foo:.* over WebRTC/, 1000)
+        await sleep(100)
+        await page.screenshot({path: '/result/connection_reseted.png'})
+        await waitForTWROutput(page, /foo:.* over WebRTC/, 2000)
     })
     test('how a gate handles disconnect', async() => {
         await page.evaluate(async () => 

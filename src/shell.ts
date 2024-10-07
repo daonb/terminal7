@@ -12,7 +12,6 @@ import { T7Map } from './map'
 import { vimMode } from '@tuzig/codemirror/keymap/vim.js'
 import { tomlMode } from '@tuzig/codemirror/mode/toml/toml.js'
 import { dialogAddOn } from '@tuzig/codemirror/addon/dialog/dialog.js'
-import { PB } from './peerbook'
 
 export class Shell {
 
@@ -34,6 +33,7 @@ export class Shell {
     historyIndex = 0
     confEditor: CodeMirror.EditorFromTextArea
     exitConf: () => void
+    watchdogResolve: () => void
     lineAboveForm = 0
     reconnectForm = [
         { prompt: "Reconnect" },
@@ -150,9 +150,9 @@ export class Shell {
     }
 
     async runCommand(cmd: string, args: string[] = []) {
-        this.map.showLog(true)
         await this.escapeActiveForm()
         await this.escapeWatchdog()
+        this.map.showLog(true)
         this.map.interruptTTY()
         this.currentLine = [cmd, ...args].join(' ')
         this.printPrompt()
@@ -164,7 +164,6 @@ export class Shell {
         await this.escapeActiveForm()
         this.stopWatchdog()
         this.map.showLog(true)
-        await new Promise(resolve => setTimeout(resolve, 0))
         this.lineAboveForm = this.t.buffer.active.baseY + this.t.buffer.active.cursorY
         this.t.write("\r\x1B[K")
         this.t.scrollToBottom()
@@ -211,8 +210,6 @@ export class Shell {
     async escapeWatchdog() {
         if (!this.watchdog) return
         this.stopWatchdog()
-        if (terminal7.activeG)
-            terminal7.activeG.onFailure(Failure.Overrun)
         await new Promise(r => setTimeout(r, 100))
         this.printPrompt()
     }
@@ -312,10 +309,14 @@ export class Shell {
     startWatchdog(timeout? : number): Promise<void> {
         if (!timeout)
             timeout = terminal7.conf.net.timeout
-        return new Promise((_, reject) => {
+        // only one watchdog, the last one
+        if (this.watchdog)
+            this.stopWatchdog()
+        return new Promise((resolve, reject) => {
+            this.watchdogResolve = resolve
             this.startHourglass(timeout)
-            this.watchdog = window.setTimeout(() => {
-                console.log("WATCHDOG TIMEOUT")
+            this.watchdog = terminal7.run(() => {
+                terminal7.log("shell watchdog timeout")
                 this.stopWatchdog()
                 reject(Failure.TimedOut)
             }, timeout)
@@ -323,28 +324,36 @@ export class Shell {
     }
 
     stopWatchdog() {
-        if (!this.watchdog) return
-        clearTimeout(this.watchdog)
-        this.watchdog = 0
-        this.stopHourglass()
+        if (this.watchdog) {
+            clearTimeout(this.watchdog)
+            this.watchdog = 0
+            this.stopHourglass()
+        }
+        if (this.watchdogResolve) {
+            this.watchdogResolve()
+            this.watchdogResolve = null
+        }
+        this.printPrompt()
     }
 
     startHourglass(timeout: number) {
         if (this.timer) return
+        this.map.showLog(true)
         const len = 20,
             interval = timeout / len
         let i = 0
         this.timer = window.setInterval(() => {
             const dots = Math.max(0, len - i) // i should never be > len, but just in case
-            this.t.write(`\r\x1B[KTWR ${" ".repeat(i)}ᗧ${"·".repeat(dots)}🍒\x1B[?25l`)
+            this.t.write(`\r\x1B[K${" ".repeat(i)}ᗧ${"·".repeat(dots)}🍒\x1B[?25l`)
             i++
         }, interval)
     }
 
     stopHourglass() {
-        if (!this.timer) return
-        clearInterval(this.timer)
-        this.timer = null
+        if (this.timer) {
+            clearInterval(this.timer)
+            this.timer = null
+        }
         this.t.write(`\r\x1B[K\x1B[?25h`)
     }
 
@@ -440,7 +449,7 @@ export class Shell {
             try {
                 res = await this.runForm(this.reconnectForm, "menu")
             } catch (err) {
-                gate.onFailure(Failure.Aborted)
+                gate.handleFailure(Failure.Aborted)
             }
             if (res == "Reconnect") {
                 await gate.connect()
@@ -451,121 +460,6 @@ export class Shell {
         this.printPrompt()
     }
 
-    /*
-     * onDisconnect is called when a gate disconnects.
-     */
-    async onDisconnect(gate: Gate, wasSSH?: boolean, failure?: Failure) {
-        terminal7.log("onDisconnect", gate.name, wasSSH, gate.firstConnection)
-        this.stopWatchdog()
-        if (wasSSH) {
-            this.escapeActiveForm()
-            terminal7.notify("⚠️ SSH Session might be lost")
-            let toConnect: boolean
-            try {
-                toConnect = terminal7.pb.isOpen()?await this.offerInstall(gate, "I'm feeling lucky"):
-                    await this.offerSub(gate)
-            } catch(e) {
-                terminal7.log("offer & connect failed", e)
-                return
-            }
-            if (toConnect) {
-                try {
-                    await this.runCommand("connect", [gate.name])
-                } catch(e) {
-                    console.log("connect failed", e)
-                }
-            }
-            this.printPrompt()
-            return
-        } 
-        if (!terminal7.netConnected)
-            return
-
-        if (failure == Failure.PBFailed)
-            terminal7.notify(`${PB} Connection failed`)
-        
-        if (!terminal7.isActive(gate)){
-            gate.stopBoarding()
-            return
-        }
-
-        if (terminal7.recovering) {
-            terminal7.log("retrying...")
-            this.startWatchdog(terminal7.conf.net.timeout).catch(e => gate.handleFailure(e))
-            try {
-                await gate.reconnect()
-                return
-            } catch (e) {
-                terminal7.log("reconnect failed", e)
-                if (e == Failure.Unauthorized) {
-                    terminal7.pb.notify("Unauthorized, please `subscribe`")
-                    return
-                }
-            } finally {
-                terminal7.recovering = false
-                this.stopWatchdog()
-            }
-            return
-
-        }
-        gate.notify("❌  Connection failed")
-        if (gate.firstConnection) {
-            this.onFirstConnectionDisconnect(gate)
-            return
-        }
-
-        let res: string
-        try {
-            res = await this.runForm(this.reconnectForm, "menu")
-        } catch (err) {
-            gate.onFailure(Failure.Aborted)
-        }
-        if (res == "Reconnect")
-            await gate.connect()
-        else {
-            gate.close()
-            this.map.showLog(false)
-        }
-        this.printPrompt()
-    }
-    async onFirstConnectionDisconnect(gate: Gate) {
-        let ans: string
-        if (gate.addr != 'localhost') {
-            const verifyForm = [{
-                prompt: `Does the address \x1B[1;37m${gate.addr}\x1B[0m seem correct?`,
-                    values: ["y", "n"],
-                    default: "y"
-            }]
-            try {
-                ans = (await this.runForm(verifyForm, "text"))[0]
-            } catch(e) {
-                gate.onFailure(Failure.WrongAddress)
-                return
-            }
-
-            if (ans == "n") {
-                gate.delete()
-                setTimeout(() => this.handleLine("add"), 100)
-                return
-            }
-        }
-        const installForm = [{
-            prompt: "Have you installed the backend - webexec?",
-                values: ["y", "n"],
-                default: "n"
-        }]
-        try {
-            ans = (await this.runForm(installForm, "text"))[0]
-        } catch(e) {
-            gate.onFailure(Failure.WrongAddress)
-        }
-
-        if (ans == "n") {
-            setTimeout(() => this.handleLine("install "+gate.name), 100)
-            
-        }
-    }
-    
     async askPass(): Promise<string> {
         const res = await this.runForm(
             [{ prompt: "Password", password: true }], "text")
@@ -580,16 +474,17 @@ export class Shell {
         if (gate.onlySSH)
             return true
         const install = [
-            { prompt: firstOption || "Connect over SSH" },
+            { prompt: firstOption || "Use SSH" },
             { prompt: "Close Gate" },
         ]
         if (gate.fp && !gate.online) {
             this.t.writeln("\rTo connect over WebRTC, webexec must be running")
             this.t.writeln(`Please run \x1B[1mwebexec start\x1B[0m on the server`)
         } else {
-            this.t.writeln("\rInstall WebExec for persistent sessions & WebRTC 🍯")
+            this.t.writeln("\n For persistent sessions & WebRTC 🍯 please install webexec")
             install.splice(1, 0, { prompt: "Install" })
-            install.splice(2, 0, { prompt: "Always use SSH" })
+            if (Capacitor.isNativePlatform())
+                install.splice(2, 0, { prompt: "Always use SSH" })
         }
         const res = await this.runForm(install, "menu")
         switch (res) {

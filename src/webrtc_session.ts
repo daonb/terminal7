@@ -1,9 +1,8 @@
 import { CapacitorHttp, HttpHeaders } from '@capacitor/core'
 import { BaseChannel, BaseSession, Channel, ChannelID, Failure, Marker } from './session'
-import { IceServers } from "./terminal7"
 
 type ChannelOpenedCB = (channel: Channel, id: ChannelID) => void 
-type RTCStats = {
+export type RTCStats = {
     timestamp: number,
     bytesSent: number,
     bytesReceived: number,
@@ -69,9 +68,9 @@ export class WebRTCChannel extends BaseChannel {
 
 export class WebRTCSession extends BaseSession {
     channels: Map<number, WebRTCChannel>
-    pendingCDCMsgs: Array<object>
+    pendingCDCMsgs: Array<{msg: ControlMessage, handlers: {ack, nack, timeout? }}>
     pendingChannels: Map<ChannelID, ChannelOpenedCB>
-    msgHandlers: Map<ChannelID, Array<(unknown)=>void>>
+    msgHandlers: Map<ChannelID, {ack, nack, timeout}>
     cdc: RTCDataChannel
     pc: RTCPeerConnection
     lastMsgId: number
@@ -92,18 +91,11 @@ export class WebRTCSession extends BaseSession {
     }
 
     // eslint-disable-next-line
-    async connect(marker?: Marker, noCDC?: boolean | string, privateKey?: string): Promise<void> {
+    async connect(marker?: Marker, noCDC?: boolean | string, privateKey?: string) {
         terminal7.log("in connect", marker, noCDC)
 
-        if (this.t7.iceServers == null) {
-            try {
-                this.t7.iceServers = await this.getIceServers()
-            } catch(e) {
-                this.t7.iceServers = []
-                terminal7.log("error getting iceservers", e)
-            }
-        }
-        this.t7.log("using ice server", JSON.stringify(this.t7.iceServers))
+        const iceServers =  await terminal7.getIceServers()
+        this.t7.log("using ice server", JSON.stringify(iceServers))
         try {
             await this.t7.getFingerprint()
         } catch (e) {
@@ -111,9 +103,12 @@ export class WebRTCSession extends BaseSession {
             this.t7.certificates = undefined
             return
         }
+        // A new RTCPeerConnection is created below
         this.pc = new RTCPeerConnection({
-            iceServers: this.t7.iceServers,
-            certificates: this.t7.certificates})
+            iceServers: iceServers,
+            certificates: this.t7.certificates},
+        )
+
         this.pc.onconnectionstatechange = () => {
             if (!this.pc)
                 return
@@ -123,9 +118,6 @@ export class WebRTCSession extends BaseSession {
                 this.closeChannels()
             if ((state !== "connected") || (marker == null))
                 this.onStateChange(state)
-        }
-        this.pc.onicecandidateerror = (ev: RTCPeerConnectionIceErrorEvent) => {
-            terminal7.log("icecandidate error", ev.errorCode, ev.errorText)
         }
         this.pc.onicecandidate = (ev: RTCPeerConnectionIceEvent) => this.onIceCandidate(ev)
 
@@ -155,16 +147,30 @@ export class WebRTCSession extends BaseSession {
         if (noCDC)
             return
 
-        if (marker != null) {
-            this.sendCTRLMsg(new ControlMessage("restore", { marker })).then(
-                () => this.onStateChange("connected")).catch(
-                () => this.onStateChange("failed", Failure.BadMarker)
-            )
-        }
         await this.openCDC()
+        if (marker != null) {
+            this.sendCTRLMsg(new ControlMessage("restore", { marker }))
+                .then(layout => {
+                    this.lastPayload = layout
+                    this.onStateChange("gotlayout")
+                })
+                .catch(e =>  {
+                    terminal7.log("failed to restore", e)
+                       if (e != Failure.TimedOut)
+                           this.onStateChange("failed", e)
+                })
+        }
     }
     isOpen(): boolean {
         return this.pc != null && this.pc.connectionState == "connected"
+    }
+    isOpenish(): boolean {
+        const state = this.pc?.connectionState
+        // This are WebRTC states that are not "closed"
+        return (
+            state == "new" ||
+            state == "connecting" ||
+            state == "connected")
     }
 
     // dcOpened is called when a data channel has been opened
@@ -209,7 +215,7 @@ export class WebRTCSession extends BaseSession {
                 msg = new ControlMessage("reconnect_pane", { id: cmdorid })
             }
             const watchdog = setTimeout(() => reject("timeout"), this.t7.conf.net.timeout)
-            this.sendCTRLMsg(msg)
+            this.sendCTRLMsg(msg).catch(reject)
             this.pendingChannels[msg.message_id] = (dc: RTCDataChannel, id: ChannelID) => {
                 clearTimeout(watchdog)
                 const channel = this.onDCOpened(dc, id)
@@ -217,21 +223,31 @@ export class WebRTCSession extends BaseSession {
             }
         })
     }
+    // reconnects to an existing session returns the payload
     async reconnect(marker?: Marker , publicKey?: string, privateKey?: string): Promise<string | void> {
-            terminal7.log("in reconnect", this.cdc, this.cdc.readyState)
-            if (marker != null) {
-                return this.sendCTRLMsg(new ControlMessage("restore", { marker }))
+        terminal7.log("in reconnect")
+        if (!this.isOpen())
+            await this.connect(marker, false, privateKey)
+        else if (!this.cdc || this.cdc.readyState != "open")
+            await this.openCDC()
+        if (marker != null) {
+            let payload: string
+            try {
+                payload = await this.sendCTRLMsg(new ControlMessage("restore", { marker }))
+            } catch(e) {
+                if (e != Failure.TimedOut)
+                    throw e
             }
-            if (!this.isOpen())
-                return this.connect(marker, publicKey, privateKey)
-            else if (!this.cdc || this.cdc.readyState != "open")
-                this.openCDC()
+            return payload
+        } else
             return this.getPayload()
     }
     openCDC(): Promise<void> {
         // stop listening for messages
-       if (this.cdc)
+       if (this.cdc) {
            this.cdc.onmessage = undefined
+           this.cdc.close()
+       }
        // TODO: improve error handling and add a reject
        return new Promise((resolve) => {
            terminal7.log(">>> opening cdc")
@@ -242,11 +258,11 @@ export class WebRTCSession extends BaseSession {
                     // This needs a bit of timeout or messages are not sent
                     this.t7.run(() => {
                         while (this.pendingCDCMsgs.length > 0) {    
-                            const msg = this.pendingCDCMsgs.shift()
-                            this.sendCTRLMsg(msg[0]).then(msg[1]).catch(msg[2])
+                            const { msg, handlers } = this.pendingCDCMsgs.shift()
+                            this.sendCTRLMsg(msg).then(handlers.ack).catch(handlers.nack)
                         }
+                        resolve()
                     }, 100)
-                    resolve()
             }
             cdc.onmessage = m => {
                 const d = new TextDecoder("utf-8"),
@@ -255,16 +271,18 @@ export class WebRTCSession extends BaseSession {
                 if ((msg.type == "ack") || (msg.type == "nack")) {
                     const i = msg.args.ref
                     const handlers = this.msgHandlers.get(i)
+                    if (handlers?.timeout)
+                        clearTimeout(handlers.timeout)
                     this.msgHandlers.delete(msg.args.ref)
                     this.t7.log("got cdc message:",  msg)
                     if (msg.type == "nack") {
-                        if (handlers && (typeof handlers[1] == "function"))
-                            handlers[1](msg.args.desc)
+                        if (handlers && (typeof handlers.nack == "function"))
+                            handlers.nack(msg.args.desc)
                         else
                             terminal7.log("A nack is unhandled", msg)
                     } else {
-                        if (handlers && (typeof handlers[0] == "function"))
-                            handlers[0](msg.args.body)
+                        if (handlers && (typeof handlers.ack == "function"))
+                            handlers.ack(msg.args.body)
                         else
                             terminal7.log("an ack is unhandled", msg)
                     }
@@ -275,24 +293,43 @@ export class WebRTCSession extends BaseSession {
     }
     sendCTRLMsg(msg: ControlMessage): Promise<string> {
         return new Promise((resolve, reject) => {
-            // helps us ensure every message gets only one Id
-            if (msg.message_id === undefined) 
-                msg.message_id = this.lastMsgId++
-            // don't change the time if it's a retransmit
-            if (msg.time == undefined)
-                msg.time = Date.now()
-            this.msgHandlers.set(msg.message_id, [resolve, reject])
-            if (!this.cdc || this.cdc.readyState != "open") {
-                // message stays frozen when restarting
-                terminal7.log("cdc not open, queuing message", msg)
-                this.pendingCDCMsgs.push([msg, resolve, reject])
-            } else {
-                this.t7.log("cdc open sending msg", msg)
+            const timeout = terminal7.run(() => {
+                terminal7.log("timeout on ctrl message", msg)
+                reject(Failure.TimedOut)
+            }, this.t7.conf.net.timeout)
+            const ack = (s) => { 
+                clearTimeout(timeout)
+                resolve(s)
+            }
+            const nack = (s) => {
+                clearTimeout(timeout)
+                reject(s)
+            }
+
+            const send = async () => {
                 try {
                     this.cdc.send(JSON.stringify(msg))
                 } catch(err) {
                     this.t7.notify(`Sending ctrl message failed: ${err}`)
                 }
+            }
+
+            if (msg.message_id === undefined) 
+                msg.message_id = this.lastMsgId++
+            // don't change the time if it's a retransmit
+            if (msg.time == undefined)
+                msg.time = Date.now()
+            const handlers = {ack, nack, timeout}
+            this.msgHandlers.set(msg.message_id, handlers)
+            if (!this.cdc || this.cdc.readyState != "open") {
+                // message stays frozen when restarting
+                terminal7.log("cdc not open, queuing message", msg)
+                this.pendingCDCMsgs.push({msg, handlers})
+                if (this.cdc && this.cdc.readyState != "connecting")
+                    this.openCDC()
+            } else {
+                this.t7.log("cdc open sending msg", msg)
+                send()
             }
         })
     }
@@ -332,45 +369,17 @@ export class WebRTCSession extends BaseSession {
         if (this.pc != null) {
             this.pc.onconnectionstatechange = undefined
             this.pc.onnegotiationneeded = undefined
+            this.cdc.onopen = undefined
+            this.cdc.onmessage = undefined
             this.cdc.close()
             this.pc.close()
             this.pc = null
         }
-    }
-    getIceServers(): Promise<IceServers[]> {
-        return new Promise((resolve, reject) => {
-            const ctrl = new AbortController(),
-                  tId = setTimeout(() => ctrl.abort(), 1000),
-                  insecure = this.t7.conf.peerbook.insecure,
-                  schema = insecure?"http":"https"
-
-            fetch(`${schema}://${this.t7.conf.net.peerbook}/turn`,
-                  {method: 'POST', signal: ctrl.signal })
-            .then(response => {
-                if (!response.ok)
-                    return null
-                else
-                    return response.json()
-            }).then(servers => {
-                clearTimeout(tId)
-                if (!servers) {
-                    reject("failed to get ice servers")
-                    return
-                }
-                // return an array with the conf's server and subspace's
-                const iceServer = this.t7.conf.net.iceServer
-                if (iceServer?.length > 0)
-                    servers.unshift({ urls: iceServer })
-                resolve(servers)
-
-            }).catch(err => {
-                clearTimeout(tId)
-                reject("failed to get ice servers " + err.toString())
-                return
-            })
-        })
+        this.msgHandlers.forEach(h => clearTimeout(h.timeout))
     }
     async getStats(): Promise<RTCStats | null> {
+        if (this.pc == null)
+            return null
         const stats = await this.pc.getStats()
         let candidatePair
         stats.forEach(s => {
@@ -391,26 +400,21 @@ export class WebRTCSession extends BaseSession {
 
 export class PeerbookSession extends WebRTCSession {
     fp: string
-    offer: RTCSessionDescriptionInit
     constructor(fp: string) {
         super()
         this.fp = fp
     }
     onIceCandidate(ev: RTCPeerConnectionIceEvent) {
         if (ev.candidate && this.t7.pb) {
-            try {
-                terminal7.log("sending candidate")
-                this.t7.pb.adminCommand(
+            this.t7.pb.adminCommand(
                     new ControlMessage("candidate", { target: this.fp, sdp: ev.candidate}))
-            } catch(e) {
-                terminal7.log("failed to send candidate", e)
-            }
+            .catch(e => terminal7.log("failed to send candidate", e))
         } else {
             terminal7.log("ignoring ice candidate", JSON.stringify(ev.candidate))
         }
     }
-    async onNegotiationNeeded(e) {
-        terminal7.log("on negotiation needed", e)
+    async onNegotiationNeeded() {
+        terminal7.log("gate needs negotiation", this.fp)
         let d: RTCSessionDescriptionInit
         try {
             d = await this.pc.createOffer()
@@ -419,33 +423,34 @@ export class PeerbookSession extends WebRTCSession {
             this.onStateChange("failed", Failure.InternalError)
             return
         }
-        const pb = terminal7.pb
-        if (pb?.session)
-            this.pc.setLocalDescription(d)
-        else
-           this.offer = d
 
+        await this.pc.setLocalDescription(d)
+
+        terminal7.log("sending offer", Date.now())
         try {
-            terminal7.log("sending offer", Date.now())
-            await pb.adminCommand(new ControlMessage( "offer", { target: this.fp, sdp: d }))
+            await this.t7.pb.adminCommand(new ControlMessage( "offer", { target: this.fp, sdp: d }))
         } catch(e) {
             terminal7.log("failed to send offer", e)
-            this.onStateChange("failed", e)
+            // ensure it's not an old session
+            if (this.pc != null)
+                this.onStateChange("failed", e)
             return
         }
+        terminal7.log("sent offer", Date.now())
     }
     async peerAnswer(offer) {
         const sd = new RTCSessionDescription(offer)
         if (this.pc.signalingState == "stable") {
-            terminal7.log("got an answer but we're stable, setting remote description")
-            await this.pc.setLocalDescription(this.offer)
-            terminal7.log("current signaling state", this.pc.signalingState)
+            terminal7.log("got an answer but signla're stable, ignoring answer")
+            return
         }
+        terminal7.log("got an answer", sd)
+
         try {
             await this.pc.setRemoteDescription(sd)
         } catch (e) {
-            terminal7.log(`Failed to set remote description: ${e}`)
-            this.onStateChange("failed", Failure.BadRemoteDescription)
+            terminal7.log(`Ignoring failure to set remote description: ${e}`)
+            // this.onStateChange("failed", Failure.BadRemoteDescription)
         }
     }
     peerCandidate(candidate) {
@@ -555,9 +560,7 @@ export class HTTPWebRTCSession extends WebRTCSession {
                     this.fail(Failure.NotSupported)
                 else
                     this.fail()
-            } else
-                return response.data
-            return null
+            }
         }).catch(error => {
             terminal7.log(`FAILED: PATCH to ${this.address} with ${JSON.stringify(this.headers)}`, error)
             if (error.message == 'unauthorized')

@@ -55,7 +55,6 @@ body {
 }
 * {
     box-sizing: border-box; 
-    touch-action: none;
 }
 *:focus { outline: none; } 
 
@@ -166,7 +165,7 @@ a {
 .keys-help tr:last-child {
     border-bottom: none;
 }
-#gates-container {
+.gates-container {
     position: fixed;
     top: 0;
     left: 0;
@@ -184,7 +183,7 @@ a {
     left: 0;
     z-index: 2;
 }
-.native #gates-container {
+.native .gates-container {
     top: 22px;
 }
 .window {
@@ -327,6 +326,7 @@ nav::-webkit-scrollbar {
     width: 100%;
     position: absolute;
     z-index: 3;
+    touch-action: none;
 }
 .oneline-box {
     color: var(--text-color);

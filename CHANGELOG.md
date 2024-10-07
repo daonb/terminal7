@@ -6,18 +6,28 @@ will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## [1.11.1] - 2024/9/29
+
+### Fixed
+
+- Even faster recconnect
+- Smoother reconnect to zoomed gates
+
+## [1.11.0] - 2024/8/29
 
 ### Added
 
 - Configurable font family and size. Under `[theme]` in the dotfile,
 you can now set `font_family` and `font_size`.
+- Search now uses regex
 
 ### Fixed
 
+- CMD-[1-9] on the web now switches to the corresponding tab
 - Handling of unverified hosts
 - Multi client layout sync
-- The font in rename and search is set to Fira Sans like the rest of the app
+- Fixing the font used in rename and search
+- Handling of out-of-band peerbook answers
 
 ## [1.10.1] - 2024/5/7
 

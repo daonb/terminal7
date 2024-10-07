@@ -7,8 +7,6 @@
  *  License: GPLv3
  */
 
-import { CustomerInfo } from "@revenuecat/purchases-typescript-internal-esm"
-
 export const PB = "\uD83D\uDCD6"
 import { Capacitor } from '@capacitor/core'
 import { Device } from '@capacitor/device'
@@ -17,7 +15,7 @@ import { Gate } from './gate'
 import { ControlMessage, HTTPWebRTCSession, PeerbookSession  } from './webrtc_session'
 import { Purchases } from '@revenuecat/purchases-capacitor'
 import { Shell } from './shell'
-import {OPEN_HTML_SYMBOL} from './terminal7'
+import {OPEN_ICON} from './terminal7'
 
 interface PeerbookProps {
     fp: string,
@@ -40,7 +38,7 @@ interface Peer {
 
 interface ConnectParams {
     token?: string  // used as the Bearer token
-    firstMsg?: ControlMessage
+    firstMsg?: { msg: ControlMessage, handlers: {ack, nack, tiemout?}}
     count?: number  // internal use for retrying
 }
 export class PeerbookConnection {
@@ -57,6 +55,8 @@ export class PeerbookConnection {
     spinnerInterval = null
     headers: Map<string,string>
     purchasesStarted = false
+    stateUnknown: boolean
+    lastMsgId = 0
 
     constructor(props:PeerbookProps) {
         // copy all props to this
@@ -67,11 +67,64 @@ export class PeerbookConnection {
     }
 
     async adminCommand(cmd: ControlMessage): Promise<string> {
+        cmd.message_id = this.lastMsgId++
         if (this.session)
             return this.session.sendCTRLMsg(cmd)
         return new Promise((resolve, reject) => {
-            terminal7.pbConnect().then(()=>
-                this.session.sendCTRLMsg(cmd).then(resolve).catch(reject)).catch(reject)
+            terminal7.log("Admin command reconnects to pb", cmd.type)
+            this.connect({firstMsg: 
+                {msg: cmd ,
+                 handlers: {
+                    ack: s => resolve(s),
+                    nack: s => reject(s),
+                }}
+            }).catch(e => {
+                reject(e)
+            })
+        })
+    }
+    // handle when the session disconeects
+    //
+    async onDisconnect({params, failure}) {
+        return new Promise<void>((resolve, reject) => {
+            let msgs = []
+            if (this.session) {
+                // storing pending messages for the new session
+                msgs = this.session.pendingCDCMsgs
+                this.session.pendingCDCMsgs = [] 
+                this.session.close()
+            }
+            this.session = null
+            this.stopSpinner()
+            terminal7.log("PB webrtc connection failed", failure, this.uid, params)
+            if (failure == Failure.Unauthorized) {
+                reject(failure)
+                return
+            }
+            let np: ConnectParams = {}
+            if (params)
+                np = {...params}
+            if (!np.count)
+                np.count = 1
+            /* TODO: remove the count and figure a way to stop endless retries
+            else if (np?.count > terminal7.conf.net.retries) {
+                terminal7.log("Failed to connect to PeerBook")
+                this.close()
+                reject(Failure.Exhausted)
+                return
+            }
+            */
+            terminal7.run(() => {
+                terminal7.log("Retrying connection to PeerBook")
+                if (np.count < 5) {
+                    np.count++
+                }
+                this.connect(np).then(resolve).catch(reject)
+                    .finally(() => {
+                        if (this.session && msgs.length)
+                            this.session.pendingCDCMsgs = msgs
+                    })
+            }, np.count * 1000)
         })
     }
 
@@ -135,7 +188,7 @@ export class PeerbookConnection {
             console.log("error verifying OTP", e.toString())
             this.shell.t.writeln("Failed to verify OTP")
             this.shell.printPrompt()
-            throw new Error("ORP Verification failed")
+            throw new Error("OTP Verification failed")
         } finally {
             this.shell.stopWatchdog()
         }
@@ -167,22 +220,7 @@ export class PeerbookConnection {
         }
     }
 
-    /*
-     * gets customer info from revenuecat and act on it
-    */
-    async updateCustomerInfo() {
-        let data: {
-            customerInfo: CustomerInfo;
-        }
-        try {
-            data = await Purchases.getCustomerInfo()
-        } catch (e) {
-            terminal7.log("Failed to get customer info", e)
-            return
-        }
-        await this.onPurchasesUpdate(data)
-    }
-
+    // handle the purchases update event from revenuecat
     async onPurchasesUpdate(data) {
         console.log("onPurchasesUpdate", data)
         if (this.updatingStore) {
@@ -215,37 +253,49 @@ export class PeerbookConnection {
             this.updatingStore = false
         }
     }
+
+    // write a message to the terminal
+    // TODO: move to shell
     async echo(data: string) {
         this.shell.t.writeln(data)
     }
 
+    // get the user id from peerbook
     async getUID(): Promise<string> {
-            if ((this.uid != "TBD") && (this.uid != "")) {
-                return(this.uid)
-            }
-            this.uid = await this.adminCommand(new ControlMessage("ping", {}))
+        if ((typeof this.uid == "string") &&
+            (this.uid != "TBD") && (this.uid != "")) {
             return(this.uid)
+        }
+        try {
+            this.uid = await this.adminCommand(new ControlMessage("ping", {}))
+        } catch(e) {
+            terminal7.log("Failed to get UID", e)
+        }
+        return(this.uid)
     }
 
-    async connect(params?: ConnectParams) {
+    // connect to PeerBook
+    connect(params?: ConnectParams) {
         return new Promise<void>((resolve, reject) =>{
+            //TODO: firstMsg should be an array
+            const reconnectParams: ConnectParams = {...(params ?? {})}
+            let msgs = (params?.firstMsg)? [params?.firstMsg] : []
             if (this.session) {
-                const state = this.session.pc.connectionState
                 // check is connection in progress 
-                if ((state == "new") || (state == "connecting")) {
+                if (this.session?.isOpenish()) {
                     resolve()
                     return
                 }
                 if (this.uid == "TBD") {
+                    // TODO: refactor to Failure.Unregitered
                     reject("Unregistered")
                     return
-                } else if (this.isOpen()) {
-                    resolve()
-                    return
-                }
-                console.log("Closing existing session connection state:", this.session.pc.connectionState)
-                this.session.close()
-                this.session = null
+                } 
+                terminal7.log("Closing pb session connection state:", this.session.pc.connectionState)
+                // not losing pending messages, add them aftyer the first message
+                msgs = msgs.concat(this.session.pendingCDCMsgs)
+                this.close()
+
             }
             this.startSpinner()
             const schema = terminal7.conf.peerbook.insecure? "http" : "https"
@@ -253,54 +303,44 @@ export class PeerbookConnection {
             if (params?.token)
                 this.headers.set("Authorization", `Bearer ${params.token}`)
             const session = new HTTPWebRTCSession(url, this.headers)
+            // restoring old messages
+            session.pendingCDCMsgs = msgs
             this.session = session
-            if (params?.firstMsg)
-                session.sendCTRLMsg(params.firstMsg).then(() => resolve).catch(reject)
-            session.onStateChange = (state, failure?) => {
+            session.onStateChange = async (state, failure?) => {
                 terminal7.log("New PB connection state", state, failure)
-                if (state == 'connected') {
-                    // send a ping to get the uid
-                    this.getUID().then(uid => {
-                        if (uid == "TBD") {
-                            terminal7.log("Got TBD as uid")
-                            reject("Unregistered")
-                        } else {
+                switch (state) {
+                    case 'connected':
+                        // remove the first message so it won't be sent again
+                        if (reconnectParams)
+                            reconnectParams.firstMsg = undefined
+                        // send a ping to get the uid
+                        this.getUID().then(uid => {
+                            if (uid == "TBD") {
+                                terminal7.log("Got TBD as uid")
+                                // TODO: refactor to failure.Unauthorized
+                                reject("Unregistered")
+                                return
+                            }
+                            // TODO: do we need this timer?
                             terminal7.run(() => Purchases.logIn({ appUserID: uid }), 10)
                             resolve()
-                        }
-                    }).catch(e => {
-                        this.session = null
-                        terminal7.log("Failed to get user id", e.toString())
-                        reject(e)
-                    }).finally(() => this.stopSpinner())
-                    return
-                }
-                else if (state == 'disconnected' || state == 'failed' || state == 'closed') {
-                    if (this.session)
-                        this.session.close()
-                    this.session = null
-                    this.stopSpinner()
-                    terminal7.log("PB webrtc connection failed", failure, this.uid)
-                    if (failure == Failure.Unauthorized) {
-                        reject(failure)
-                    } else {
-                        let np: ConnectParams = {}
-                        if (params)
-                            np = {...params}
-                        if (!np.count)
-                            np.count = 1
-                        else if (np?.count > terminal7.conf.net.retries) {
-                            terminal7.log("Failed to connect to PeerBook")
-                            reject(failure)
+                        }).catch(e => {
+                            this.session = null
+                            terminal7.log("Failed to get user id", e.toString())
+                            reject(e)
+                        }).finally(() => this.stopSpinner())
+                        break
+                    case 'disconnected':
+                    case 'failed':
+                    case 'closed':
+                        try {
+                            await this.onDisconnect({params: reconnectParams, failure})
+                        } catch(e) {
+                            terminal7.log("onDisconnect failed", e)
+                            reject(e)
                             return
                         }
-                        setTimeout(() => {
-                            terminal7.log("Retrying connection to PeerBook")
-                            np.count++
-                            this.connect(np).then(resolve).catch(reject)
-                        }, 100)
-                    }
-                    return
+                        break
                 }
             }
             session.onCMD = (msg) => this.onMessage(msg)
@@ -310,9 +350,11 @@ export class PeerbookConnection {
             })
         })
     }
+    // print a notification on TWR
     notify(msg: string) {
         terminal7.notify(PB + " " + msg)
     }
+    // close the connection
     close() {
         if (this.session) {
             this.session.onStateChange = undefined
@@ -320,9 +362,12 @@ export class PeerbookConnection {
             this.session = null
         }
     }
+    // check if the connection is open
     isOpen() {
-        return (this.session && this.session.isOpen())
+        return (this.session?.isOpen())
     }
+    // sync exiting gates with the peers
+    // TODO: move to Map
     syncPeers(gates: Array<Gate>, nPeers: Array<Peer>) {
         const ret = []
         const index = {}
@@ -340,7 +385,7 @@ export class PeerbookConnection {
                 gate = new Gate(p)
                 gate.id = ret.length
                 gate.nameE = terminal7.map.add(gate)
-                gate.open(terminal7.e)
+                gate.open(terminal7.e.querySelector(".gates-container"))
                 ret.push(gate)
             }
             for (const k in p) {
@@ -354,13 +399,7 @@ export class PeerbookConnection {
         let validated = false
         // TODO:gAdd biometrics verification
         while (!validated) {
-            console.log("Verifying FP", fp)
-            let otp: string
-            try {
-                otp = await this.shell.askValue(prompt || "Enter OTP to verify gate")
-            } catch(e) {
-                return
-            }
+            const otp = await this.shell.askValue(prompt || "Enter OTP to verify gate")
             try {
                 await this.adminCommand(new ControlMessage("verify", { target: fp, otp: otp }))
                 validated = true
@@ -382,6 +421,7 @@ export class PeerbookConnection {
             terminal7.gates.forEach((g,i: number) => terminal7.log(`gate ${i}:`, g.fp))
         }
     }
+    // purchase a package using revenuecat
     purchase(aPackage): Promise<void> {
         return new Promise((resolve, reject) => {
             // ensure there's only one listener
@@ -393,6 +433,7 @@ export class PeerbookConnection {
             })
         })
     }   
+    // stop flashing the satellite icon
     stopSpinner() {
         const statusE = document.getElementById("peerbook-status") as HTMLElement
         statusE.style.opacity = "1"
@@ -401,6 +442,7 @@ export class PeerbookConnection {
             this.spinnerInterval = null
         }
     }
+    // start flashing the satellite icon
     startSpinner() {
         const statusE = document.getElementById("peerbook-status")
         let i = 0.1, change = 0.1
@@ -414,7 +456,7 @@ export class PeerbookConnection {
             }
             statusE.style.opacity = String(i)
         }, 200)
-        statusE.innerHTML = OPEN_HTML_SYMBOL
+        statusE.innerHTML = OPEN_ICON
         statusE.style.opacity = "0"
     }
     // handle incomming peerbook messages
@@ -423,7 +465,7 @@ export class PeerbookConnection {
         terminal7.log("got pb message", m)
         if (m["code"] !== undefined) {
             if (m["code"] == 200) {
-                statusE.innerHTML = OPEN_HTML_SYMBOL
+                statusE.innerHTML = OPEN_ICON
                 this.uid = m["text"]
             } else
                 // TODO: update statusE
@@ -439,6 +481,10 @@ export class PeerbookConnection {
         if (m["verified"] !== undefined) {
             if (!m["verified"])
                 this.notify(`Unverified client. Please check you email.`)
+            return
+        }
+        if (m["ice_servers"] !== undefined) {
+            terminal7.setIceServers(m["ice_servers"])
             return
         }
         const fp = m.source_fp

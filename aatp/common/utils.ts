@@ -25,7 +25,6 @@ export async function connectFirstGate(page, gateName?) {
     await btn.click()
 }
 export async function getTWRBuffer(page) {
-    console.log("getting twr buffer")
     let ret = await page.evaluate(() => {
         const t = window.terminal7.map.t0
         const b = t.buffer.active
@@ -36,10 +35,9 @@ export async function getTWRBuffer(page) {
         }
         return ret.trimEnd()
     })
-    console.log("--> b4 trimming:", ret)
     ret = ret.substring(checkedC)
+    console.log(`TWR.substring(${checkedC}):`, ret)
     checkedC = ret.length
-    console.log("TWR", ret)
     return ret
 }
 export function webexecReset(uid: string) {
